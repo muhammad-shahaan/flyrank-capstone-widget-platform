@@ -1,4 +1,6 @@
-from fastapi import FastAPI, HTTPException, Request, Header
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Request, Header, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -8,7 +10,13 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
-from database import init_db, save_submission, get_connection
+from database import (
+    init_db,
+    save_submission,
+    get_connection,
+    get_submission_widget
+)
+
 from geo import get_geo_data
 
 from widgets import (
@@ -82,7 +90,7 @@ def startup_event():
 # =========================================================
 
 class SubmissionCreate(BaseModel):
-    widget_id: int
+    widget_id: int = Field(gt=0)
 
     name: str = Field(
         min_length=1,
@@ -199,6 +207,7 @@ def health():
 @app.post("/widgets", status_code=201)
 def create_widget_endpoint(
     widget: WidgetCreate,
+    request: Request,
     x_api_key: str = Header(...)
 ):
     tenant_id = get_tenant_id(x_api_key)
@@ -211,9 +220,17 @@ def create_widget_endpoint(
         button_text=widget.button_text
     )
 
+    api_base = str(request.base_url).rstrip("/")
+
+    embed_snippet = (
+        f'<script src="{api_base}/widget.js?v=1" '
+        f'data-widget-id="{widget_id}"></script>'
+    )
+
     return {
         "message": "Widget created successfully",
-        "widget_id": widget_id
+        "widget_id": widget_id,
+        "embed_snippet": embed_snippet
     }
 
 
@@ -305,14 +322,63 @@ def delete_widget_endpoint(
 
 
 # =========================================================
+# AUTHENTICATED EMBED SNIPPET
+# =========================================================
+
+@app.get("/widgets/{widget_id}/snippet")
+def get_widget_snippet(
+    widget_id: int,
+    request: Request,
+    x_api_key: str = Header(...)
+):
+    tenant_id = get_tenant_id(x_api_key)
+
+    widget = get_widget(
+        widget_id=widget_id,
+        tenant_id=tenant_id
+    )
+
+    if widget is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Widget not found"
+        )
+
+    api_base = str(request.base_url).rstrip("/")
+
+    snippet = (
+        f'<script src="{api_base}/widget.js?v=1" '
+        f'data-widget-id="{widget_id}"></script>'
+    )
+
+    return {
+        "widget_id": widget_id,
+        "snippet": snippet
+    }
+
+
+# =========================================================
 # EMBEDDABLE WIDGET SCRIPT
 # =========================================================
 
-@app.get("/widget.js")
+@app.get("/widget.js", include_in_schema=False)
 def widget_script():
+    widget_file = (
+        Path(__file__).parent / "widget.js"
+    )
+
+    if not widget_file.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Widget script not found"
+        )
+
     return FileResponse(
-        "widget.js",
-        media_type="application/javascript"
+        path=widget_file,
+        media_type="application/javascript",
+        headers={
+            "Cache-Control": "public, max-age=3600"
+        }
     )
 
 
@@ -321,8 +387,10 @@ def widget_script():
 # =========================================================
 
 @app.get("/widgets/{widget_id}/config")
-def public_widget_config(widget_id: int):
-
+def public_widget_config(
+    widget_id: int,
+    response: Response
+):
     widget = get_public_widget(widget_id)
 
     if widget is None:
@@ -330,6 +398,10 @@ def public_widget_config(widget_id: int):
             status_code=404,
             detail="Widget not found"
         )
+
+    response.headers[
+        "Cache-Control"
+    ] = "public, max-age=60"
 
     return {
         "widget": widget
@@ -347,9 +419,9 @@ def create_submission(
     submission: SubmissionCreate
 ):
 
-    # -------------------------
+    # -----------------------------------------------------
     # Honeypot Spam Protection
-    # -------------------------
+    # -----------------------------------------------------
 
     if submission.website:
         raise HTTPException(
@@ -358,9 +430,32 @@ def create_submission(
         )
 
 
-    # -------------------------
+    # -----------------------------------------------------
+    # Verify Widget Exists
+    # -----------------------------------------------------
+
+    submission_widget = get_submission_widget(
+        submission.widget_id
+    )
+
+    if submission_widget is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Widget not found"
+        )
+
+
+    # -----------------------------------------------------
+    # Tenant Comes From Widget
+    # Never trust tenant information from public visitor
+    # -----------------------------------------------------
+
+    tenant_id = submission_widget["tenant_id"]
+
+
+    # -----------------------------------------------------
     # Visitor IP
-    # -------------------------
+    # -----------------------------------------------------
 
     ip_address = (
         request.client.host
@@ -369,9 +464,9 @@ def create_submission(
     )
 
 
-    # -------------------------
+    # -----------------------------------------------------
     # Default Geo Data
-    # -------------------------
+    # -----------------------------------------------------
 
     geo_data = {
         "country": None,
@@ -380,9 +475,9 @@ def create_submission(
     }
 
 
-    # -------------------------
+    # -----------------------------------------------------
     # Geo Enrichment
-    # -------------------------
+    # -----------------------------------------------------
 
     if ip_address:
         geo_data = get_geo_data(
@@ -390,12 +485,13 @@ def create_submission(
         )
 
 
-    # -------------------------
-    # Save Submission
-    # -------------------------
+    # -----------------------------------------------------
+    # Save Valid Submission
+    # -----------------------------------------------------
 
     submission_id = save_submission(
         widget_id=submission.widget_id,
+        tenant_id=tenant_id,
         name=submission.name,
         email=submission.email,
         message=submission.message,
@@ -405,9 +501,9 @@ def create_submission(
     )
 
 
-    # -------------------------
+    # -----------------------------------------------------
     # Response
-    # -------------------------
+    # -----------------------------------------------------
 
     return {
         "message": "Submission stored successfully",
