@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+# Local environment
+.env
+
+# Local database
+capstone.db
+*.db
+
+# Python virtual environment
+venv/
