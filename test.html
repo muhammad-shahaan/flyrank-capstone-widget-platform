@@ -1,59 +1,25 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
-    <title>Widget Test Page</title>
+    <title>Customer Website</title>
 </head>
+
 <body>
 
     <h1>Customer Website</h1>
 
-    <form id="leadForm">
-        <input id="name" type="text" placeholder="Name" required>
-        <br><br>
+    <p>
+        This page represents an external customer website.
+    </p>
 
-        <input id="email" type="email" placeholder="Email" required>
-        <br><br>
-
-        <textarea id="message" placeholder="Message" required></textarea>
-        <br><br>
-
-        <button type="submit">Submit</button>
-    </form>
-
-    <p id="result"></p>
-
-    <script>
-        document.getElementById("leadForm").addEventListener("submit", async (event) => {
-            event.preventDefault();
-
-            const data = {
-                widget_id: 1,
-                name: document.getElementById("name").value,
-                email: document.getElementById("email").value,
-                message: document.getElementById("message").value
-            };
-
-            try {
-                const response = await fetch("http://127.0.0.1:8000/submissions", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json"
-                    },
-                    body: JSON.stringify(data)
-                });
-
-                const result = await response.json();
-
-                document.getElementById("result").textContent =
-                    `Status: ${response.status} - ${JSON.stringify(result)}`;
-
-            } catch (error) {
-                document.getElementById("result").textContent =
-                    "Request failed: " + error;
-            }
-        });
+    <!-- FlyRank Widget -->
+    <script
+        src="http://127.0.0.1:8000/widget.js"
+        data-widget-id="1">
     </script>
 
 </body>
+
 </html>
