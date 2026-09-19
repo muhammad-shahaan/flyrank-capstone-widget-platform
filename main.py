@@ -1,9 +1,17 @@
 
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, Header, Response
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Request,
+    Header,
+    Response
+)
+
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
@@ -11,14 +19,29 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+
+# =========================================================
+# DATABASE
+# =========================================================
+
 from database import (
     init_db,
-    save_submission,
     get_connection,
-    get_submission_widget
+    get_submission_widget,
+    create_idempotent_submission
 )
 
+
+# =========================================================
+# GEO
+# =========================================================
+
 from geo import get_geo_data
+
+
+# =========================================================
+# WIDGETS
+# =========================================================
 
 from widgets import (
     create_widget,
@@ -29,10 +52,26 @@ from widgets import (
     get_public_widget
 )
 
+
+# =========================================================
+# DASHBOARD
+# =========================================================
+
 from dashboard import (
     get_dashboard_stats,
     get_tenant_submissions,
     get_widget_submissions
+)
+
+
+# =========================================================
+# BACKGROUND JOBS
+# =========================================================
+
+from jobs import (
+    init_jobs,
+    process_due_jobs,
+    get_job_status
 )
 
 
@@ -47,7 +86,9 @@ load_dotenv()
 # RATE LIMITER
 # =========================================================
 
-limiter = Limiter(key_func=get_remote_address)
+limiter = Limiter(
+    key_func=get_remote_address
+)
 
 
 # =========================================================
@@ -89,7 +130,9 @@ app.add_middleware(
 
 @app.on_event("startup")
 def startup_event():
+
     init_db()
+    init_jobs()
 
 
 # =========================================================
@@ -97,6 +140,7 @@ def startup_event():
 # =========================================================
 
 class SubmissionCreate(BaseModel):
+
     widget_id: int = Field(gt=0)
 
     name: str = Field(
@@ -114,11 +158,11 @@ class SubmissionCreate(BaseModel):
         max_length=1000
     )
 
-    # Honeypot spam field
     website: str = ""
 
 
 class WidgetCreate(BaseModel):
+
     type: str = Field(
         min_length=1,
         max_length=50
@@ -141,6 +185,7 @@ class WidgetCreate(BaseModel):
 
 
 class WidgetUpdate(BaseModel):
+
     type: str = Field(
         min_length=1,
         max_length=50
@@ -198,6 +243,7 @@ def get_tenant_id(api_key: str):
 
 @app.get("/")
 def root():
+
     return {
         "message": "Widget Platform API is running"
     }
@@ -205,6 +251,7 @@ def root():
 
 @app.get("/health")
 def health():
+
     return {
         "status": "healthy"
     }
@@ -517,14 +564,21 @@ def public_widget_config(
 
 
 # =========================================================
-# PUBLIC SUBMISSION API
+# PUBLIC SUBMISSION API WITH IDEMPOTENCY
 # =========================================================
 
 @app.post("/submissions", status_code=201)
 @limiter.limit("5/minute")
 def create_submission(
     request: Request,
-    submission: SubmissionCreate
+    response: Response,
+    submission: SubmissionCreate,
+    idempotency_key: str | None = Header(
+        default=None,
+        alias="Idempotency-Key",
+        min_length=1,
+        max_length=128
+    )
 ):
 
     # -----------------------------------------------------
@@ -553,7 +607,6 @@ def create_submission(
 
     # -----------------------------------------------------
     # Tenant Comes From Widget
-    # Never trust tenant information from public visitor
     # -----------------------------------------------------
 
     tenant_id = submission_widget["tenant_id"]
@@ -588,30 +641,120 @@ def create_submission(
         )
 
     # -----------------------------------------------------
-    # Save Valid Submission
+    # Atomic Submission + Notification Job
     # -----------------------------------------------------
 
-    submission_id = save_submission(
+    result = create_idempotent_submission(
         widget_id=submission.widget_id,
         tenant_id=tenant_id,
         name=submission.name,
         email=submission.email,
         message=submission.message,
+        idempotency_key=idempotency_key,
         ip_address=ip_address,
         country=geo_data.get("country"),
         city=geo_data.get("city")
     )
 
     # -----------------------------------------------------
-    # Response
+    # Idempotency Conflict
     # -----------------------------------------------------
+
+    if result["conflict"]:
+        raise HTTPException(
+            status_code=409,
+            detail=result["message"]
+        )
+
+    # -----------------------------------------------------
+    # Duplicate Request
+    # -----------------------------------------------------
+
+    if result["duplicate"]:
+
+        response.status_code = 200
+
+        return {
+            "message": "Submission already exists",
+            "duplicate": True,
+            "submission_id": result["submission_id"],
+            "job_id": result["job_id"],
+            "job_status": result["job_status"]
+        }
+
+    # -----------------------------------------------------
+    # New Submission
+    # -----------------------------------------------------
+
+    response.status_code = 201
 
     return {
         "message": "Submission stored successfully",
-        "submission_id": submission_id,
+        "duplicate": False,
+        "submission_id": result["submission_id"],
+        "job_id": result["job_id"],
+        "job_status": result["job_status"],
         "geo": {
             "country": geo_data.get("country"),
             "city": geo_data.get("city"),
             "provider": geo_data.get("provider")
         }
     }
+
+
+# =========================================================
+# BACKGROUND JOB PROCESSING
+# =========================================================
+
+@app.post("/jobs/process")
+def process_jobs_endpoint(
+    force_failure: bool = False,
+    x_api_key: str = Header(...)
+):
+
+    tenant_id = get_tenant_id(x_api_key)
+
+    # Local demo-only worker trigger.
+    # Replace with admin authorization in production.
+
+    if tenant_id != 1:
+        raise HTTPException(
+            status_code=403,
+            detail="Job processing is restricted"
+        )
+
+    results = process_due_jobs(
+        limit=10,
+        force_failure=force_failure
+    )
+
+    return {
+        "processed_count": len(results),
+        "results": results
+    }
+
+
+# =========================================================
+# GET JOB STATUS
+# =========================================================
+
+@app.get("/jobs/{job_id}")
+def job_status_endpoint(
+    job_id: int,
+    x_api_key: str = Header(...)
+):
+
+    tenant_id = get_tenant_id(x_api_key)
+
+    job = get_job_status(
+        job_id=job_id,
+        tenant_id=tenant_id
+    )
+
+    if job is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Job not found"
+        )
+
+    return job
