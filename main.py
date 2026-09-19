@@ -1,3 +1,4 @@
+
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Header, Response
@@ -26,6 +27,12 @@ from widgets import (
     update_widget,
     delete_widget,
     get_public_widget
+)
+
+from dashboard import (
+    get_dashboard_stats,
+    get_tenant_submissions,
+    get_widget_submissions
 )
 
 
@@ -160,18 +167,21 @@ class WidgetUpdate(BaseModel):
 # =========================================================
 
 def get_tenant_id(api_key: str):
+
     connection = get_connection()
 
-    row = connection.execute(
-        """
-        SELECT id
-        FROM tenants
-        WHERE api_key = ?
-        """,
-        (api_key,)
-    ).fetchone()
+    try:
+        row = connection.execute(
+            """
+            SELECT id
+            FROM tenants
+            WHERE api_key = ?
+            """,
+            (api_key,)
+        ).fetchone()
 
-    connection.close()
+    finally:
+        connection.close()
 
     if row is None:
         raise HTTPException(
@@ -210,6 +220,7 @@ def create_widget_endpoint(
     request: Request,
     x_api_key: str = Header(...)
 ):
+
     tenant_id = get_tenant_id(x_api_key)
 
     widget_id = create_widget(
@@ -238,6 +249,7 @@ def create_widget_endpoint(
 def list_widgets_endpoint(
     x_api_key: str = Header(...)
 ):
+
     tenant_id = get_tenant_id(x_api_key)
 
     widgets = get_widgets(
@@ -254,6 +266,7 @@ def get_widget_endpoint(
     widget_id: int,
     x_api_key: str = Header(...)
 ):
+
     tenant_id = get_tenant_id(x_api_key)
 
     widget = get_widget(
@@ -276,6 +289,7 @@ def update_widget_endpoint(
     widget: WidgetUpdate,
     x_api_key: str = Header(...)
 ):
+
     tenant_id = get_tenant_id(x_api_key)
 
     updated = update_widget(
@@ -303,6 +317,7 @@ def delete_widget_endpoint(
     widget_id: int,
     x_api_key: str = Header(...)
 ):
+
     tenant_id = get_tenant_id(x_api_key)
 
     deleted = delete_widget(
@@ -322,6 +337,96 @@ def delete_widget_endpoint(
 
 
 # =========================================================
+# TENANT DASHBOARD STATISTICS
+# =========================================================
+
+@app.get("/dashboard/stats")
+def dashboard_stats_endpoint(
+    x_api_key: str = Header(...)
+):
+
+    tenant_id = get_tenant_id(x_api_key)
+
+    return get_dashboard_stats(
+        tenant_id=tenant_id
+    )
+
+
+# =========================================================
+# TENANT SUBMISSIONS
+# =========================================================
+
+@app.get("/dashboard/submissions")
+def dashboard_submissions_endpoint(
+    limit: int = 50,
+    offset: int = 0,
+    x_api_key: str = Header(...)
+):
+
+    tenant_id = get_tenant_id(x_api_key)
+
+    if limit < 1 or limit > 100:
+        raise HTTPException(
+            status_code=400,
+            detail="Limit must be between 1 and 100"
+        )
+
+    if offset < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Offset cannot be negative"
+        )
+
+    submissions = get_tenant_submissions(
+        tenant_id=tenant_id,
+        limit=limit,
+        offset=offset
+    )
+
+    return {
+        "tenant_id": tenant_id,
+        "count": len(submissions),
+        "submissions": submissions
+    }
+
+
+# =========================================================
+# SUBMISSIONS FOR A SPECIFIC WIDGET
+# =========================================================
+
+@app.get("/dashboard/widgets/{widget_id}/submissions")
+def widget_submissions_endpoint(
+    widget_id: int,
+    x_api_key: str = Header(...)
+):
+
+    tenant_id = get_tenant_id(x_api_key)
+
+    widget = get_widget(
+        widget_id=widget_id,
+        tenant_id=tenant_id
+    )
+
+    if widget is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Widget not found"
+        )
+
+    submissions = get_widget_submissions(
+        widget_id=widget_id,
+        tenant_id=tenant_id
+    )
+
+    return {
+        "widget_id": widget_id,
+        "tenant_id": tenant_id,
+        "count": len(submissions),
+        "submissions": submissions
+    }
+
+
+# =========================================================
 # AUTHENTICATED EMBED SNIPPET
 # =========================================================
 
@@ -331,6 +436,7 @@ def get_widget_snippet(
     request: Request,
     x_api_key: str = Header(...)
 ):
+
     tenant_id = get_tenant_id(x_api_key)
 
     widget = get_widget(
@@ -363,6 +469,7 @@ def get_widget_snippet(
 
 @app.get("/widget.js", include_in_schema=False)
 def widget_script():
+
     widget_file = (
         Path(__file__).parent / "widget.js"
     )
@@ -391,6 +498,7 @@ def public_widget_config(
     widget_id: int,
     response: Response
 ):
+
     widget = get_public_widget(widget_id)
 
     if widget is None:
@@ -429,7 +537,6 @@ def create_submission(
             detail="Spam submission rejected"
         )
 
-
     # -----------------------------------------------------
     # Verify Widget Exists
     # -----------------------------------------------------
@@ -444,14 +551,12 @@ def create_submission(
             detail="Widget not found"
         )
 
-
     # -----------------------------------------------------
     # Tenant Comes From Widget
     # Never trust tenant information from public visitor
     # -----------------------------------------------------
 
     tenant_id = submission_widget["tenant_id"]
-
 
     # -----------------------------------------------------
     # Visitor IP
@@ -463,7 +568,6 @@ def create_submission(
         else None
     )
 
-
     # -----------------------------------------------------
     # Default Geo Data
     # -----------------------------------------------------
@@ -474,7 +578,6 @@ def create_submission(
         "provider": None
     }
 
-
     # -----------------------------------------------------
     # Geo Enrichment
     # -----------------------------------------------------
@@ -483,7 +586,6 @@ def create_submission(
         geo_data = get_geo_data(
             ip_address
         )
-
 
     # -----------------------------------------------------
     # Save Valid Submission
@@ -499,7 +601,6 @@ def create_submission(
         country=geo_data.get("country"),
         city=geo_data.get("city")
     )
-
 
     # -----------------------------------------------------
     # Response
